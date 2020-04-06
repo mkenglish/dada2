@@ -1,40 +1,48 @@
 ---
-title: "exp_19"
+title: "Experiment 19: Larval microbiome by probiotic cocktail treatment and species"
 author: "Mary English"
 date: "2/10/2020"
-output: rmarkdown::github_document
+output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r}
-library(dada2)
+```{r path, warning = FALSE, message = FALSE}
 path <- "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_19/"
+library(dada2)
+library(vegan)
+library(BiocGenerics)
+library(Biostrings)
+library(phyloseq)
+library(ggplot2)
+library(ape)
 ```
 \
+Get forward and reverse reads.
 ```{r}
 fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
 fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
-
 ```
 \
+Extract sample names from the file names and store the sample names in a separate object.
 ```{r}
 sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
-
 ```
 \
+Plot an example of read quality.
 ```{r}
 plotQualityProfile(fnFs[1:2])
 ```
 \
-Fwd drops off at about 240\
+Forward drops off at about 240.\
+Reverse drops off at about 140.
 ```{r}
 plotQualityProfile(fnRs[1:2])
 ```
 \
-oof jesus um maybe 140?\
+Distinguish the reads that are quality-controlled (which we'll do next) from original .fastq files
 ```{r}
 filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
 filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
@@ -42,6 +50,7 @@ names(filtFs) <- sample.names
 names(filtRs) <- sample.names
 ```
 \
+Filtering using fwd and rev read quality dropoff measurements, and default parameters for everything else.
 ```{r}
 out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs,
                      truncLen=c(240,140),
@@ -53,41 +62,44 @@ out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs,
                      multithread=TRUE)
 ```
 \
-learn errors\
-```{r}
+Learn errors.
+```{r errors, warning = FALSE, message = FALSE}
 errF <- learnErrors(filtFs, multithread=TRUE)
 errR <- learnErrors(filtRs, multithread=TRUE)
 ```
 \
-```{r}
+Use filtered sequences and learned error rates to make an object for dada2 to work with.
+```{r FRs, warning = FALSE, message = FALSE, results = FALSE}
 dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
 dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
 ```
 \
-```{r}
+"Denoise" -- inspect the object to see how many true sequence variants there are in all the sequences in a given sample (in this case, sample 1).
+```{r dadaFs, warning = FALSE, message = FALSE}
 dadaFs[[1]] # 116 variants
 ```
 \
-merge forward and reverse reads\
-```{r}
+Merge forward and reverse reads.
+```{r merge, warning = FALSE, message = FALSE, results = "hide"}
 mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
 ```
 \
-make sequence table\
+Make sequence table.
 ```{r}
 seqtab <- makeSequenceTable(mergers)
 dim(seqtab) # 28 x 275. 28 samples; so we lost 1. rip
 table(nchar(getSequences(seqtab)))
 ```
 \
-These are all very close, not going to remove any.\
-Remove bimeras\
+These lengths are all very close in value, so there are no outliers to remove.\
+\
+Remove bimeras.
 ```{r}
 seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
 dim(seqtab.nochim) # no chimeras
 ```
 \
-Track filtering.\
+Track filtering.
 ```{r}
 getN <- function(x) sum(getUniques(x))
 track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
@@ -96,7 +108,7 @@ rownames(track) <- sample.names
 write.csv(track, file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_19/exp_19_filter_track.csv")
 ```
 \
-Based on these numbers, I removed samples with <1000 "final" (nonchim) reads. I also removed these from the corresponding metadata table.\
+Based on these numbers, I removed samples with <1000 "final" (nonchim) reads. I also removed these from the corresponding metadata table.
 ```{r}
 exp_19_asv <- seqtab.nochim
 dim(exp_19_asv) # 28 x 275
@@ -105,7 +117,7 @@ dim(exp_19_asv_filt) # 18 x 275, 18 samples.
 write.csv(exp_19_asv_filt, file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_19/exp_19_asv_filt.csv")
 ```
 \
-Assign taxonomy.\
+Assign taxonomy.
 ```{r}
 exp_19_taxa_filt <- assignTaxonomy(exp_19_asv_filt, "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/silva_nr_v132_train_set.fa.gz", multithread=TRUE, tryRC = TRUE)
 write.csv(exp_19_taxa_filt, file =  "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_19/exp_19_taxa_filt.csv")
@@ -114,10 +126,8 @@ write.csv(exp_19_taxa_filt, file =  "~/Documents/Oyster_Project/sequencing_feb_2
 If taxonomy only assigns to kingdom level, try this from https://github.com/benjjneb/dada2/issues/192: 
 tax <- assignTaxonomy(dada2:::rc(getSequences(st)), ref.file))\
 \
-Remove mitochondria and chloroplasts.\
+Remove mitochondria and chloroplasts.
 ```{r}
-library(BiocGenerics)
-library(lessR)
 reduce_taxa <- apply(exp_19_taxa_filt, 1, function(r) any(r %in% c("Chloroplast", "Mitochondria")))
 dim(exp_19_asv_filt) # 18 x 275
 exp_19_asv_filt_reduc <- exp_19_asv_filt[,!reduce_taxa]
@@ -126,69 +136,65 @@ exp_19_asv_filt_reduc <- t(exp_19_asv_filt_reduc)
 dim(exp_19_asv_filt_reduc) # 271 x 18
 ```
 \
-So there are 4 mitochondria and chloroplasts in these reads.\
-Remove from taxa table.\
+There are 4 mitochondria and chloroplasts in these reads.\
+Remove from taxa table.
 ```{r}
 dim(exp_19_taxa_filt) # 275 x 6
 exp_19_taxa_filt_reduc <- exp_19_taxa_filt[!reduce_taxa,]
 dim(exp_19_taxa_filt_reduc) # 271 x 6
 ```
 \
-Start writing fasta -- make 'seqs' BEFORE changing to asvs\
+Start writing fasta -- make 'seqs' BEFORE changing to asvs.
 ```{r}
 seqs <- rownames(exp_19_asv_filt_reduc)
 ```
 \
-Change sequences to "asv001" etc. in taxa and asv tables.\
-```{r}
+Change sequences to "asv001" etc. in taxa and asv tables.
+```{r, lessload, message = FALSE, warning = FALSE}
+library(lessR)
 asvs <- to("asv", nrow(exp_19_taxa_filt_reduc))
 rownames(exp_19_taxa_filt_reduc) <- asvs
 rownames(exp_19_asv_filt_reduc) <- asvs
 ```
 \
-Rewrite asv and taxa tables after the reduction\
+Rewrite asv and taxa tables after the reduction of mitochondria and chloroplast reads.
 ```{r}
 write.csv(exp_19_asv_filt_reduc, file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_19/exp_19_asv_filt_reduc.csv")
 write.csv(exp_19_taxa_filt_reduc, file =  "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_19/exp_19_taxa_filt_reduc.csv")
 ```
 \
-Finish writing fasta of asvs\
+Finish writing fasta of asvs.
 ```{r}
-library(Biostrings)
 seqs <- DNAStringSet(seqs)
 names(seqs) <- asvs
 writeXStringSet(x = seqs, filepath = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_19/exp_19_filt_reduc_seqs.fa")
 ```
 \
-<mothur>\
-align.seqs(fasta=exp_19_filt_reduc_seqs.fa, reference=/nfs0/Mueller_Lab/sequence_databases/16S_db/silva/silva.nr_v132.align, flip=t, processors=48)\
-filter.seqs(fasta=exp_19_filt_reduc_seqs.align, processors=20)\
-exit\
+Following steps are done on command line.\
+Align and filter seqs.\
+<span style="color: green;"> mothur > align.seqs(fasta=exp_19_filt_reduc_seqs.fa, reference=/nfs0/Mueller_Lab/sequence_databases/16S_db/silva/silva.nr_v132.align, flip=t, processors=48)\
+mothur > filter.seqs(fasta=exp_19_filt_reduc_seqs.align, processors=20)</span>\
+Build phylogenetic tree and re-root from midpoint.\
+<span style="color: blue;"> FastTreeMP -gtr -nt -log exp_19_filt_reduc_seqs.filter.log exp_19_filt_reduc_seqs.filter.fasta > exp_19_filt_reduc_seqs.filter.tre\
+/local/cluster/mueller/scripts/Genomics/stat/reroot.pl -midpoint < exp_19_filt_reduc_seqs.filter.tre > exp_19_filt_reduc_seqs.filter.midroot.tre </span>\
 \
-FastTreeMP -gtr -nt -log exp_19_filt_reduc_seqs.filter.log exp_19_filt_reduc_seqs.filter.fasta > exp_19_filt_reduc_seqs.filter.tre\
-/local/cluster/mueller/scripts/Genomics/stat/reroot.pl -midpoint < exp_19_filt_reduc_seqs.filter.tre > exp_19_filt_reduc_seqs.filter.midroot.tre\
-
 tree file: exp_19_filt_reduc_seqs.filter.midroot.tre\
 fasta file: exp_19_filt_reduc_seqs.filter.fasta\
-Load tree\
+\
+Load tree.
 ```{r}
-library(ape)
 exp_19_tree <- read.tree(file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_19/exp_19_filt_reduc_seqs.filter.midroot.tre")
 plot(exp_19_tree)
 ```
 \
-Load fasta file\
+Load fasta file.
 ```{r}
 exp_19_fasta <- readDNAStringSet("~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_19/exp_19_filt_reduc_seqs.filter.fasta")
 ```
 \
-Handoff to phyloseq\
-```{r}
-library(phyloseq)
-library(ggplot2)
-```
+Handoff to phyloseq.\
 \
-Start organizing the different tables needed for phyloseq.\
+Start organizing the different tables needed for phyloseq.
 ```{r}
 meta_19 <- read.table("~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_19/exp_19_metadata.csv", 
                       sep = ",", header = TRUE, row.names = 1)
@@ -198,7 +204,7 @@ asv_19 <- as.matrix(read.table("~/Documents/Oyster_Project/sequencing_feb_2020/f
                                sep = ",", header = TRUE, row.names = 1))
 ```
 \
-Build phyloseq object\
+Build phyloseq object.
 ```{r}
 exp_19_phylo <- phyloseq(otu_table(asv_19, taxa_are_rows = TRUE),
                          sample_data(meta_19),
@@ -207,37 +213,52 @@ exp_19_phylo <- phyloseq(otu_table(asv_19, taxa_are_rows = TRUE),
                          refseq(exp_19_fasta))
 ```
 \
-Prune taxa that = 0\
+Prune taxa that <= 0.
 ```{r}
 exp_19_phylo_sum <- prune_taxa(taxa_sums(exp_19_phylo) > 0, exp_19_phylo)
 ```
 \
-Plot beta diversity - weighted UNIFRAC\
+Plot beta diversity - weighted UNIFRAC.
 ```{r}
 exp_19_phylo_sum_wuni <- ordinate(exp_19_phylo_sum, "PCoA", "unifrac", weighted=TRUE)
 exp_19_phylo_sum_wuni_plot <- plot_ordination(exp_19_phylo_sum, exp_19_phylo_sum_wuni, 
-                                              color = "Treatment",
+                                              color = "Lineage",
+                                              shape = "Treatment",
                                               title = "Exp 19 larval microbiome ordination plot (Weighted UNIFRAC)")
-exp_19_phylo_sum_wuni_plot + geom_point(size = 6)
+exp_19_phylo_sum_wuni_plot + 
+  geom_point(size = 6) +
+  scale_colour_manual(values = c("#FDE725FF", "#73D055FF", "#2D708EFF")) +
+  theme(panel.background = element_rect(fill = "gray85"),
+        panel.border = element_rect(linetype = 1, colour = "black", fill = NA),
+        legend.key = element_rect(fill = "gray85"),
+        legend.background = element_rect(linetype = 1, colour = "black"))
 ```
 \
-Plot beta diversity - unweighted UNIFRAC\
+Plot beta diversity - unweighted UNIFRAC.
 ```{r}
 exp_19_phylo_sum_uni <- ordinate(exp_19_phylo_sum, "PCoA", "unifrac", weighted= FALSE)
 exp_19_phylo_sum_uni_plot <- plot_ordination(exp_19_phylo_sum, exp_19_phylo_sum_uni, 
-                                             color = "Treatment", 
+                                             color = "Lineage", 
+                                             shape = "Treatment",
                                              title = "Exp 19 larval microbiome ordination plot (Unweighted UNIFRAC)")
-exp_19_phylo_sum_uni_plot + geom_point(size = 6)
+exp_19_phylo_sum_uni_plot + 
+  geom_point(size = 6) + 
+  scale_colour_manual(values = c("#FDE725FF", "#73D055FF", "#2D708EFF")) + 
+  theme(panel.background = element_rect(fill = "gray85"),
+        panel.border = element_rect(linetype = 1, colour = "black", fill = NA),
+        legend.key = element_rect(fill = "gray85"),
+        legend.background = element_rect(linetype = 1, colour = "black"))
 ```
 \
-\
-\
-\
-To-do later
-\
-Calculate weighted unifrac beta diversity. Do UNIFRAC separate for use in adonis2.
+PERMANOVA\
+Questions:\
+> Do probiotic and control cluster separately?\
+> How much does oyster species affect clustering?\
+
 ```{r}
 exp_19_phylo_sum_wunidist <- UniFrac(exp_19_phylo_sum, weighted = TRUE, normalized=TRUE, parallel=TRUE, fast=TRUE)
-
+exp_19_phylo_sum_wunidist_treat <- adonis2(exp_19_phylo_sum_wunidist ~ Treatment, data = meta_19)
+exp_19_phylo_sum_wunidist_treat
+exp_19_phylo_sum_wunidist_line <- adonis2(exp_19_phylo_sum_wunidist ~ Lineage, data = meta_19)
+exp_19_phylo_sum_wunidist_line
 ```
-
