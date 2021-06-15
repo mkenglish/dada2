@@ -1,0 +1,575 @@
+---
+title: 'Experiment 18: Larval microbiome by probiotic cocktail treatment'
+author: "Mary English"
+date: "4/9/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+\
+Summary: These samples come from Experiment 18 (10L bucket trial) where larvae were treated with the probiotic cocktail (B11 + DM14 + D16) or not. There were five replicates of each treatment (larvae only, probiotics a single time, probiotics after every water change). DNA was isolated from these 15 samples and the 16S rRNA gene amplified and sequenced on Illumina HiSeq 3000. Sequences were filtered for quality and a total of 14/15 samples remained. Beta diversity was plotted and PERMANOVAs performed to look for differences in the community composition between samples depending on the variables of 1) whether or not probiotics were added at all, and 2) the number of times the probiotic cocktail was added.
+\
+
+```{r path, warning = FALSE, message = FALSE}
+path <- "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/"
+library(dada2)
+library(vegan)
+library(BiocGenerics)
+library(Biostrings)
+library(phyloseq)
+library(ggplot2)
+library(ape)
+library(lessR)
+```
+\
+Get forward and reverse reads.
+```{r}
+fnFs_18 <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs_18 <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+```
+\
+Extract sample names from the file names and store the sample names in a separate object.
+\
+```{r}
+sample.names_18 <- sapply(strsplit(basename(fnFs_18), "_"), `[`, 1)
+```
+\
+Plot an example of read quality.
+```{r}
+plotQualityProfile(fnFs_18[1:2])
+plotQualityProfile(fnRs_18[1:2])
+```
+\
+Forward drops off at 220.\
+Reverse drops off at 150.\
+\
+Distinguish the reads that are quality-controlled (next) from original .fastq files.
+```{r}
+filtFs_18 <- file.path(path, "filtered", paste0(sample.names_18, "_F_filt.fastq.gz"))
+filtRs_18 <- file.path(path, "filtered", paste0(sample.names_18, "_R_filt.fastq.gz"))
+names(filtFs_18) <- sample.names_18
+names(filtRs_18) <- sample.names_18
+```
+\
+Filtering using fwd and rev read quality dropoff measurements, and default parameters for everything else.
+```{r}
+out_18 <- filterAndTrim(fnFs_18, filtFs_18, fnRs_18, filtRs_18,
+                     truncLen=c(220,150),
+                     maxN=0,
+                     maxEE=c(2,2),
+                     truncQ=2,
+                     rm.phix=TRUE,
+                     compress=TRUE,
+                     multithread=TRUE)
+```
+\
+Learn error rates.
+```{r errors, warning = FALSE, message = FALSE}
+errF_18 <- learnErrors(filtFs_18, multithread=TRUE)
+errR_18 <- learnErrors(filtRs_18, multithread=TRUE)
+```
+\
+
+Use filtered sequences and learned error rates to make an object for dada2 to work with.
+```{r FRs, warning = FALSE, message = FALSE, results = FALSE}
+dadaFs_18 <- dada(filtFs_18, err=errF_18, multithread=TRUE)
+dadaRs_18 <- dada(filtRs_18, err=errR_18, multithread=TRUE)
+```
+\
+"Denoise" -- inspect the object to see how many true sequence variants there are in all the sequences in a given sample (in this case, sample 1).
+```{r dadaFs, warning = FALSE, message = FALSE}
+dadaFs_18[[1]] # 79
+dadaRs_18[[1]] # 49
+```
+\
+You could do the same thing for the reverse with "dadaRs[[1]]", if you wanted. But you don't need any of the information from this.\
+\
+Merge forward and reverse reads.
+```{r merge, warning = FALSE, message = FALSE, results = "hide"}
+mergers_18 <- mergePairs(dadaFs_18, filtFs_18, dadaRs_18, filtRs_18, verbose=TRUE)
+```
+\
+Make sequence table.
+```{r}
+seqtab_18 <- makeSequenceTable(mergers_18)
+dim(seqtab_18) # 16 x 231
+table(nchar(getSequences(seqtab_18)))
+```
+\
+Filtering all sequence lengths to between 251 and 255 bp, inclusive.\
+```{r}
+seqtab_18_2 <- seqtab_18[,nchar(colnames(seqtab_18)) %in% 251:255]
+seqtab_18 <- seqtab_18_2
+```
+\
+Remove bimeras and see what percent of reads remain.
+```{r}
+seqtab_18.nochim <- removeBimeraDenovo(seqtab_18, method="consensus", multithread=TRUE, verbose=TRUE)
+# 2 bimeras
+sum(seqtab_18.nochim)/sum(seqtab_18)
+```
+\
+Track filtering.
+```{r}
+getN <- function(x) sum(getUniques(x))
+track_18 <- cbind(out_18, sapply(dadaFs_18, getN), sapply(dadaRs_18, getN), sapply(mergers_18, getN), rowSums(seqtab_18.nochim))
+colnames(track_18) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track_18) <- sample.names_18
+write.csv(file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_filter_track.csv", x = track_18)
+```
+\
+Removing one sample -- LB -- because it had <1000 reads after filtering. This is done later on.\
+\
+Make asv table.
+```{r}
+df_18 <- as.data.frame(seqtab_18.nochim)
+df_18 <- as.matrix(df_18)
+```
+\
+Not going to rarefy. Remove sample LB because it has 685 reads; next-lowest is 1043.
+```{r}
+rownames(df_18)
+dim(df_18) # 16 x 225
+df_18_nolb <- df_18[-c(12),] # remove row 12 (LB)
+dim(df_18_nolb) # 15 x 225
+df_18_nolb_noneg <- df_18_nolb[-c(15),]# also removing row 15, the negative
+dim(df_18_nolb_noneg) # 14 x 225
+min(rowSums(df_18_nolb_noneg)) # 1043
+rowSums(df_18_nolb_noneg)
+exp_18_asv <- df_18_nolb_noneg
+write.csv(exp_18_asv, file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_asv.csv")
+```
+\
+Now to assign taxonomy.
+```{r}
+exp_18_taxa <- assignTaxonomy(exp_18_asv, "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/silva_nr_v132_train_set.fa.gz", 
+                                       multithread=TRUE,
+                                       tryRC = TRUE)
+```
+\
+Remove mitochondria and chloroplasts (below)\
+```{r}
+reduce_taxa <- apply(exp_18_taxa, 1, function(r) any(r %in% c("Chloroplast", "Mitochondria")))
+```
+
+#remove from count table
+```{r}
+dim(exp_18_asv) # 14 x 225
+write.csv(exp_18_asv, file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/asvs_incl_mitochloro.csv")
+exp_18_asv_reduce <- exp_18_asv[,!reduce_taxa]
+```
+See how many were removed
+```{r}
+dim(exp_18_asv_reduce) # 14 x 219
+```
+225 --> 219, so 6 were mito/chloro.\
+\
+Dealing with otu(asv) table.
+```{r}
+exp_18_asv <- exp_18_asv_reduce
+seqs_18 <- colnames(exp_18_asv)
+length(seqs_18) # 219
+```
+\
+Now transpose. ASVs need to be rows.
+```{r}
+exp_18_asv <- t(exp_18_asv)
+dim(exp_18_asv) # 219 x 14
+```
+\
+Now work on the taxonomy table. Remove the mitochondria and chloroplasts from these. Then, rename rows of both asv and taxonomy tables.
+```{r}
+dim(exp_18_taxa) # 225 x 6.
+exp_18_taxa <- exp_18_taxa[!reduce_taxa,]
+dim(exp_18_taxa) # 219 x 6
+asvs_18 <- to("asv", nrow(exp_18_taxa))
+#onedig <- paste("asv00", 1:9, sep = "")
+#twodig <- paste("asv0", 10:99, sep = "")
+#threedig <- paste("asv", 100:219, sep = "")
+#asv <- c(onedig, twodig, threedig)
+#asvs <- asv
+rownames(exp_18_asv) <- asvs_18 #asvs
+write.csv(exp_18_asv, file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_asvs_for_manip.csv")
+rownames(exp_18_taxa) <- asvs_18 #taxa
+head(rownames(exp_18_taxa))
+dim(exp_18_taxa) # 218 x 6
+write.csv(exp_18_taxa, file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_taxa.csv")
+```
+\
+For phyloseq
+```{r}
+exp_18_meta <- read.csv("~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_nolb_meta.csv", sep=",", header=T, row.names=1)
+exp_18_meta$Probiotic_dose <- NA
+exp_18_meta$Probiotic_dose <- c("once","once","once","once","once","every wc","every wc","every wc","every wc", "every wc","none","none","none","none")
+exp_18_meta$Probiotic_dose <- factor(exp_18_meta$Probiotic_dose, levels = c("none", "once", "every wc"))
+```
+\
+Make a fasta file for your phyloseq object.
+```{r}
+seqs_18 <- DNAStringSet(seqs_18)
+names(seqs_18) <- asvs_18
+writeXStringSet(x = seqs_18, filepath = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_asv_strings.fa")
+```
+Align and filter seqs.
+```{bash}
+mothur "#align.seqs(fasta=exp_18_asv_strings.fa, reference=/nfs0/Mueller_Lab/sequence_databases/16S_db/silva/silva_v123/silva.nr_v123.align, flip=t, processors=8)"
+mothur "#filter.seqs(fasta=exp_18_asv_strings_no213.align, processors=8)"
+```
+Build tree and reroot from midpoint.
+```{bash}
+FastTreeMP -gtr -nt -log exp_18_asv_strings.filter.log exp_18_asv_strings.filter.fasta > exp_18_asv_strings.filter.tre
+/local/cluster/mueller/scripts/Genomics/stat/reroot.pl -midpoint < exp_18_asv_strings.filter.tre > exp_18_asv_strings.filter.midroot.tre
+```
+Read in and plot your tree:
+```{r}
+exp_18_tree <- read.tree(file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_asv_strings.filter.midroot.tre")
+plot(exp_18_tree)
+```
+\
+Removing AsV213 - it doesn't match to anything.
+
+exp_18_asv_strings_no213.fa
+```{bash}
+mothur "#align.seqs(fasta=exp_18_asv_strings_no213.fa, reference=/nfs0/Mueller_Lab/sequence_databases/16S_db/silva/silva_v123/silva.nr_v123.align, flip=t, processors=18)"
+mothur "#filter.seqs(fasta=exp_18_asv_strings.align, processors=20)"
+```
+
+Build tree and reroot from midpoint.
+```{bash}
+
+FastTreeMP -gtr -nt -log exp_18_asv_strings_no213.filter.log exp_18_asv_strings_no213.filter.fasta > exp_18_asv_strings_no213.filter.tre
+/local/cluster/mueller/scripts/Genomics/stat/reroot.pl -midpoint < exp_18_asv_strings_no213.filter.tre > exp_18_asv_strings_no213.filter.midroot.tre
+```
+Read in and plot your tree:
+```{r}
+exp_18_tree_no213 <- read.tree(file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_asv_strings.filter.midroot.tre")
+plot(exp_18_tree_no213)
+exp_18_tree <- exp_18_tree_no213
+```
+Remove 213 from ASV and taxa tables:
+```{r}
+exp_18_asv_no213 <- exp_18_asv[-c(213),]
+exp_18_taxa_no213 <- exp_18_taxa[-c(213),]
+exp_18_asv <- exp_18_asv_no213
+exp_18_taxa <- exp_18_taxa_no213
+```
+
+Get your reference fasta file:
+```{r}
+exp_18_fasta_no213 <- readDNAStringSet("~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_asv_strings_no213.fa")
+exp_18_fasta <- exp_18_fasta_no213
+```
+
+Now build your phyloseq object.
+```{r}
+exp_18_phylo <- phyloseq(otu_table(exp_18_asv, taxa_are_rows = TRUE), 
+                                   sample_data(exp_18_meta),
+                                   tax_table(exp_18_taxa),
+                                   phy_tree(exp_18_tree),
+                                   refseq(exp_18_fasta))
+```
+\
+Prune taxa that <= 0.
+```{r}
+exp_18_phylo_sum <- prune_taxa(taxa_sums(exp_18_phylo) > 0, exp_18_phylo)
+```
+\
+Do PERMANOVAs on weighted UniFrac beta diversity. Do UNIFRAC separate for use in adonis2.
+```{r}
+exp_18_phylo_sum_wunidist <- UniFrac(exp_18_phylo_sum, weighted=TRUE, normalized=TRUE, parallel=TRUE, fast=TRUE)
+exp_18_nolb_metadata <- read.csv("~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_nolb_metadata.csv", sep=",", header=T, row.names=1)
+# Is there a statistical difference between adding probiotics 0 vs 1 vs >1 times
+
+exp_18_phylo_sum_wunidist_adonis_probx_num <- adonis2(exp_18_phylo_sum_wunidist ~ Probiotic_dose, 
+                                                      data = exp_18_meta)
+exp_18_phylo_sum_wunidist_adonis_probx_num # p = 0.047 yes
+
+#Ok, what about protiotic_any
+exp_18_phylo_sum_wunidist_adonis_probx_any <- adonis2(exp_18_phylo_sum_wunidist ~ Probiotic_any, 
+                                                      data = exp_18_meta)
+exp_18_phylo_sum_wunidist_adonis_probx_any # no, 0.332 here
+```
+\
+Plot beta diversity. Do UNIFRAC separate for use in adonis2.
+```{r}
+# Plot for probiotics different numbers of times
+exp_18_phylo_sum_wuni <- ordinate(exp_18_phylo_sum, "PCoA", "unifrac", weighted=TRUE)
+exp_18_phylo_sum_wuni_plot <- plot_ordination(exp_18_phylo_sum, 
+                                              exp_18_phylo_sum_wuni, 
+                                              color = "Probiotic_dose",
+                                              title = "Larval microbiome ordination plot (Weighted UNIFRAC)")
+pbx_any_wunifrac_plot <- 
+  exp_18_phylo_sum_wuni_plot + 
+  geom_point(size = 6)+
+  scale_color_manual(values = c("lightskyblue", "dodgerblue2", "darkblue"))+
+  annotate("rect", xmin = -0.025, xmax = 0.14, ymin = 0.02, ymax = 0.095, alpha = 0.2)+
+  annotate("rect", xmin = .145, xmax = 0.205, ymin = 0.045, ymax = 0.085, alpha = 1, fill = "white", color = "white")+
+  annotate("text", label = "p = 0.047", x = 0.175, y = 0.065, size = 4, color = "black", fontface = "bold")+
+  theme(legend.position = "bottom")
+
+ggsave(filename = "pbx_any_wunifrac_plot.jpg", plot = pbx_any_wunifrac_plot, path = path, scale = 2.5, width = 100, height = 50, units = "mm")
+
+# what about probiotic none vs any?
+exp_18_phylo_sum_wuni_plot <- plot_ordination(exp_18_phylo_sum, 
+                                              exp_18_phylo_sum_wuni, 
+                                              color = "Probiotic_any",
+                                              title = "Larval microbiome ordination plot (Weighted UNIFRAC)")
+exp_18_phylo_sum_wuni_plot + geom_point(size = 6)+
+  scale_color_manual(values = c("dodgerblue2", "darkblue"))+
+  annotate("text", label = "p = 0.332", x = 0.05, y = 0.005)+
+  theme(legend.position = "bottom")
+
+
+# Is there a statistical difference between adding probiotics 0 vs not 0 times
+exp_18_phylo_sum_wunidist_adonis_probx <- adonis2(exp_18_phylo_sum_wunidist ~ Probiotic_any, 
+                                                  data = exp_18_meta)
+exp_18_phylo_sum_wunidist_adonis_probx # p = 0.353
+
+```
+\
+A bar plot\
+```{r}
+plot_bar(exp_18_phylo_sum, fill = "Class")
+```
+Plotting top 20 Families.
+```{r}
+top20asvs <- names(sort(taxa_sums(exp_18_phylo_sum), TRUE)[1:20])
+taxatop20 <- cbind(tax_table(exp_18_phylo_sum), family20 = NA)
+taxatop20[top20asvs, "family20"] <- as(tax_table(exp_18_phylo_sum)[top20asvs, "Family"], "character")
+tax_table(exp_18_phylo_sum) <- tax_table(taxatop20)
+plot_bar(exp_18_phylo_sum, "Sample", fill = "family20")
+# convert abundance to percentages of sequences
+exp_18_phylo_sum_percents <- transform_sample_counts(exp_18_phylo_sum, function(x) 100 * x/sum(x))
+plot_bar(exp_18_phylo_sum_percents, "Sample", fill = "family20")+ 
+  ylab("Percentage of sequences") +
+  scale_fill_manual(values = mkePalette_20)
+# prune to get rid of grays
+exp_18_phylo_sum_percents_pruned <- prune_taxa(top20asvs, exp_18_phylo_sum_percents)
+plot_bar(exp_18_phylo_sum_percents_pruned, fill = "family20") + ylab("Percentage of sequences") + scale_fill_manual(values = mkePalette_20)
+# making 20-value color palette
+mkePalette_20 <- c("#FDE725FF", "#DCE319FF", "#B8DE29FF", "#95D840FF", "#73D055FF",
+  "#55C667FF", "#3CBB75FF", "#29AF7FFF", "#20A387FF", "#1F968BFF",
+  "#238A8DFF", "#287D8EFF", "#2D708EFF", "#33638DFF", "#39568CFF", 
+  "#404788FF", "#453781FF", "#482677FF", "#481567FF", "#440154FF")
+```
+Now by genus.
+```{r}
+top20asvs_g <- names(sort(taxa_sums(exp_18_phylo_sum), TRUE)[1:20])
+taxatop20_g <- cbind(tax_table(exp_18_phylo_sum), genus20 = NA)
+taxatop20_g[top20asvs_g, "genus20"] <- as(tax_table(exp_18_phylo_sum)[top20asvs_g, "Genus"], "character")
+tax_table(exp_18_phylo_sum) <- tax_table(taxatop20_g)
+plot_bar(exp_18_phylo_sum, "Sample", fill = "genus20")
+# convert abundance to percentages of sequences
+exp_18_phylo_sum_percents <- transform_sample_counts(exp_18_phylo_sum, function(x) 100 * x/sum(x))
+plot_bar(exp_18_phylo_sum_percents, "Sample", fill = "genus20")+ 
+  ylab("Percentage of sequences") +
+  scale_fill_manual(values = mkePalette_20)
+# prune to get rid of grays
+exp_18_phylo_sum_percents_pruned_g <- prune_taxa(top20asvs_g, exp_18_phylo_sum_percents)
+plot_bar(exp_18_phylo_sum_percents_pruned_g, fill = "genus20") + ylab("Percentage of sequences") + scale_fill_manual(values = mkePalette_20)
+
+```
+Ordering by top 20 asvs in 1B.
+```{r}
+exp_18_1B <- exp_18_phylo_sum@otu_table[,"1B"]
+df_1B <- as.data.frame(exp_18_1B)
+df_1B_order <- df_1B[order(-df_1B$`1B`),]
+
+```
+I've reformatted and created a spreadsheet of all the ASVs found in 1B. Going to work with this.
+```{r}
+exp_18_1b_only <- read_csv("~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_1b_only.csv")
+order_1b <- exp_18_1b_only[order(-exp_18_1b_only$Percent),]
+top21_1b <- order_1b[c(1:21),] # these are the asvs with > 1% abundance in 1B
+ggplot(top21_1b)+
+  geom_point(mapping = aes(x = Class, y = Percent))+
+  labs(title = "Relative abundance of ASVs by class in sample 1B",
+       y = "Perent of sample's total reads")+
+  theme(axis.text.x = element_text(angle = 45))
+
+ggplot(top21_1b)+
+  geom_bar(mapping = aes(x = Class))
+```
+
+
+It looks like they cluster, but only the probiotics after every water change group.
+\
+Check for significance with PERMANOVA?
+```{r}
+exp_18_phylo_sum_wunidist <- UniFrac(exp_18_phylo_sum, weighted=TRUE, normalized=TRUE, parallel=TRUE, fast=TRUE)
+exp_18_nolb_metadata <- read.csv("~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_nolb_metadata.csv", sep=",", header=T, row.names=1)
+# Is there a statistical difference between adding probiotics 0 vs 1 vs >1 times
+exp_18_phylo_sum_wunidist_adonis_probx_num <- adonis2(exp_18_phylo_sum_wunidist ~ Probiotic_num, 
+                                                      data = exp_18_meta)
+exp_18_phylo_sum_wunidist_adonis_probx_num # p = 0.118
+# Is there a statistical difference between adding probiotics 0 vs not 0 times
+exp_18_phylo_sum_wunidist_adonis_probx <- adonis2(exp_18_phylo_sum_wunidist ~ Probiotic_any, 
+                                                  data = exp_18_meta)
+exp_18_phylo_sum_wunidist_adonis_probx # p = 0.39
+######
+exp_18_nolb_reduced_rare_phylo_sum_wunidist <- UniFrac(exp_18_nolb_reduced_rare_phylo_sum, weighted=TRUE, normalized=TRUE, parallel=TRUE, fast=TRUE)
+exp_18_nolb_reduced_rare_phylo_sum_wuni <- adonis2(exp_18_nolb_reduced_rare_phylo_sum_wunidist ~ Probiotic_num, data = exp_18_nolb_metadata)
+exp_18_nolb_reduced_rare_phylo_sum_wuni  
+#maybe try changing integer --> factor
+exp_18_nolb_metadata$Probiotic_num_factor <- c("none", "none", "none", "none", 
+                                               "once", "once", "once", "once", "once",
+                                               "every wc", "every wc", "every wc", "every wc", "every wc")
+exp_18_nolb_reduced_rare_phylo_sum_wuni <- adonis2(exp_18_nolb_reduced_rare_phylo_sum_wunidist ~ Probiotic_num_factor, data = exp_18_nolb_metadata)
+exp_18_nolb_reduced_rare_phylo_sum_wuni # with integer as a factor
+```
+
+Checking for any probiotic at all:
+```{r}
+exp_18_nolb_reduced_rare_phylo_sum_wuni_plot_2 <- plot_ordination(exp_18_nolb_reduced_rare_phylo_sum, 
+  exp_18_nolb_reduced_rare_phylo_sum_wuni, 
+  color = "Probiotic", 
+  #label = "Sample_names", 
+  title = "Larval microbiome ordination plot (Weighted UNIFRAC)")
+exp_18_nolb_reduced_rare_phylo_sum_wuni_plot_2 + geom_point(size = 6)
+
+adonis2(exp_18_nolb_reduced_rare_phylo_sum_wunidist ~ Probiotic, data = exp_18_nolb_metadata)
+```
+p = 0.101
+
+
+OOh I should try out Ancom!
+```{r}
+ancom_dose <- ancombc(phyloseq = exp_18_phylo_sum, formula = "Probiotic_dose", group = "Probiotic_dose", struc_zero = TRUE, neg_lb = TRUE, conserve = TRUE, global = TRUE)
+#annotation color for columns and rows
+annotation_color 
+ComplexHeatmap::pheatmap(exp_18_asv, scale = "row")
+```
+lol no thats hard
+
+DeSeq2
+```{r}
+deseq_obj_probiotic_any <- phyloseq_to_deseq2(exp_18_phylo_sum, ~ Probiotic_any)
+deseq_obj_probiotic_any <- DESeq(deseq_obj_probiotic_any, test = "Wald", fitType = "parametric")
+deseq_results_probiotic_any <- results(deseq_obj_probiotic_any, cooksCutoff = FALSE)
+sigtab_probiotic_any <- deseq_results_probiotic_any[which(deseq_results_probiotic_any$padj < 0.1),]
+
+sigtab_probiotic_any <- cbind(as(sigtab_probiotic_any, "data.frame"), as(tax_table(exp_18_phylo_sum)[rownames(sigtab_probiotic_any), ], "matrix"))
+head(sigtab_probiotic_any)
+#asvs 027 (p < 0.0001), 033 (p = 0.09875), 032 (p < 0.0001)
+#Made an excel file called pbx_any_deseq.csv
+pbx_any_deseq$Taxa <- factor(pbx_any_deseq$Taxa, levels = c("Pseudoalteromonas sp. (ASV_027)", "Methylotenera sp. (ASV_033)", "Glaciecola sp. (ASV_032)"))
+pbx_any_deseq_plot <- ggplot(pbx_any_deseq)+
+  geom_bar(aes(x=Sample, y = Percent, fill = Taxa), stat = "identity")+
+  scale_fill_manual(values = c("#DC4405","grey50", "black"))+
+  facet_grid( .~ Probiotic_any, space="free_x", scales="free_x", switch="x")+
+  labs(title = "Differentially abundant taxa in probiotic vs. non-probiotic treated oyster larvae", 
+       y = "Percent of sample's reads")
+  theme(legend.position = "right", legend.direction = "vertical")
+ggsave(filename = "pbx_any_deseq_plot.jpg", plot = pbx_any_deseq_plot, path = path, scale = 2.5, width = 100, height = 50, units = "mm")
+
+deseq_obj_probiotic_dose <- phyloseq_to_deseq2(exp_18_phylo_sum, ~ Probiotic_dose)
+deseq_obj_probiotic_dose <- DESeq(deseq_obj_probiotic_dose, test = "Wald", fitType = "parametric")
+deseq_results_probiotic_dose <- results(deseq_obj_probiotic_dose, cooksCutoff = FALSE)
+sigtab_probiotic_dose <- deseq_results_probiotic_dose[which(deseq_results_probiotic_dose$padj < 0.1),]
+#literally none
+
+deseq_obj_probiotic_num <- phyloseq_to_deseq2(exp_18_phylo_sum, ~ Probiotic_num)
+deseq_obj_probiotic_num <- DESeq(deseq_obj_probiotic_num, test = "Wald", fitType = "parametric")
+deseq_results_probiotic_num <- results(deseq_obj_probiotic_num, cooksCutoff = FALSE)
+sigtab_probiotic_num <- deseq_results_probiotic_num[which(deseq_results_probiotic_num$padj < 0.1),]
+sigtab_probiotic_num <- cbind(as(sigtab_probiotic_num, "data.frame"), as(tax_table(exp_18_phylo_sum)[rownames(sigtab_probiotic_num), ], "matrix"))
+#asv022
+pbx_dose_deseq_plot <- ggplot(pbx_dose_deseq)+
+  geom_bar(aes(x=Sample, y = Percent, fill = Taxa), stat = "identity")+
+  scale_fill_manual(values = c("steelblue"))+
+  facet_grid( .~ Probiotic_dose, space="free_x", scales="free_x", switch="x")+
+  labs(title = "Differentially abundant taxa in probiotic vs. non-probiotic treated oyster larvae, dose-dependent", 
+       y = "Percent of sample's reads",
+       x = "Sample")+
+  theme(legend.position = "right", legend.direction = "vertical")
+#pbx_dose_deseq_plot_grid <- grid.arrange(pbx_dose_deseq_plot, bottom = textGrob("Sample", x = 0.35, gp = gpar(fontsize = 10)))
+#grid.arrange(pbx_dose_deseq_plot_grid)
+ggsave(filename = "pbx_dose_deseq_plot.jpg", plot = pbx_dose_deseq_plot, path = path, scale = 2.5, width = 100, height = 50, units = "mm")
+
+```
+
+Bowtie
+```{bash}
+bowtie2-build exp_18_added_pbx.fa exp_18_pbx
+bowtie2 -f -p 20 -x exp_18_pbx -U exp_18_asv_strings_no213.fa -S exp_18_pbx.sam
+# Convert sam to bam for Tablet viewer
+samtools view -S -b exp_18_pbx.sam > exp_18_pbx.bam
+#Sort
+samtools sort exp_18_pbx.bam -o exp_18_pbx_sort.bam
+#Need an index alignment
+samtools index exp_18_pbx_sort.bam
+```
+
+Making a subset so that I can track Epibacterium alignments across samples.
+```{r}
+#asv table
+epi_hits_asv <- exp_18_asv[c(12,15,38,42,44,58,91,121,149,171),]
+epi_hits_asv <- t(epi_hits_asv)
+#messed around with it in excel
+epi_hits <- read_csv("~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/epi_hits.csv")
+epi_hits$Treatment <- c("once","once","once","once","once","every wc","every wc","every wc","every wc", "every wc","none","none","none","none")
+epi_hits_plot <- ggplot(epi_hits)+
+  geom_bar(aes(x=Sample, y = Rhodobact_prcnt_reads, fill = Treatment), stat = "identity")+
+  labs(title = "Bowtie hits of pbx Epibacterium sp. in larval microbiome by pbx treatment", 
+       y = "% sample's reads aligning to Rhodobacteraceae",
+       x = "Sample",
+       caption = "Bowtie alignment with >99% certainty")+
+  theme(legend.position = "right", legend.direction = "vertical")
+ggsave(filename = "epi_hits_plot.png",plot = epi_hits_plot, path = path, scale = 2.5, width = 100, height = 50, units = "mm")
+```
+
+Gonna make a phylo tree with the 4 differentially abundant taxa.
+seqs.fa file looks like:
+`>ASV_022
+GATCGA
+`>ASV_027
+GAATC
+
+```{bash}
+mothur "#align.seqs(fasta=deseq_seqs_all.fa, reference=/nfs0/Mueller_Lab/sequence_databases/16S_db/silva/silva_v123/silva.nr_v123.align, flip=t, processors=25)"
+mothur "#filter.seqs(fasta=deseq_seqs_all.align, processors=20)"
+FastTreeMP -gtr -nt -log deseq_seqs_all.filter.log deseq_seqs_all.fa > deseq_seqs_all.filter.tre
+/local/cluster/mueller/scripts/Genomics/stat/reroot.pl -midpoint < deseq_seqs_all.filter.tre > deseq_seqs_all.filter.midroot.tre
+```
+
+```{r}
+exp_18_deseq_tree <- read.tree(file = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/deseq_seqs_all.filter.midroot.tre")
+plot(exp_18_deseq_tree)
+
+```
+
+Aight so i guess im gonna make a phyloseq object or some shit
+fuck if i know
+```{r}
+exp_18_deseq_asv <- exp_18_asv[c(22,27,32,33),]
+exp_18_deseq_taxa <- exp_18_taxa[c(22,27,32,33),]
+exp_18_deseq_seqs.fa <- DNAStringSet(exp_18_deseq_seqs.fa)
+writeXStringSet(x = exp_18_deseq_seqs.fa, filepath = "~/Documents/Oyster_Procject/sequencing_feb_2020/fastq_files/exp_18/deseq_seqs.fa")
+exp_18_deseq_seqs.fa<- read_csv("~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/deseq_strings.csv")
+
+seqs_18 <- colnames(exp_18_asv)
+seqs_18 <- DNAStringSet(seqs_18)
+
+seqs_18 <- DNAStringSet(seqs_18)
+names(seqs_18) <- asvs_18
+writeXStringSet(x = seqs_18, filepath = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_asv_strings.fa")
+seqs_18 <- colnames(exp_18_asv)
+length(seqs_18) # 219
+
+asvs_deseq <- c("asv022", "asv027", "asv032", "asv033")
+deseq_seqs <- DNAStringSet(deseq_seqs)
+names(deseq_seqs) <- asvs_deseq
+deseq_seqs <- DNAStringSet(deseq_seqs)
+writeXStringSet(x = deseq_seqs, filepath = "~/Documents/Oyster_Project/sequencing_feb_2020/fastq_files/exp_18/exp_18_deseq_strings.fa")
+
+
+exp_18_phylo <- phyloseq(otu_table(exp_18_deseq_asv, taxa_are_rows = TRUE), 
+                                   sample_data(exp_18_meta),
+                                   tax_table(exp_18_deseq_taxa),
+#                                   phy_tree(exp_18_deseq_tree),
+                                   refseq(exp_18_deseq_seqs.fa))
+```
+
+
